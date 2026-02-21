@@ -12,7 +12,7 @@ Created during [DACH Open: Interim Masters](https://osu.ppy.sh/community/forums/
 ## Usage
 
 1. Start osu!tourney and wait for every instance to initialize
-2. Run the executable; starts on port `25050` by default
+2. Run the executable
 
 ### Command-Line Arguments
 
