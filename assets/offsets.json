@@ -1,0 +1,23 @@
+{
+  "patterns": {
+    "base": "F8 01 74 04 83 65",
+    "rulesets": "7D 15 A1 ?? ?? ?? ?? 85 C0"
+  },
+  "base": {
+    "beatmap_ptr": -12
+  },
+  "beatmap": {
+    "map_id": 200
+  },
+  "ruleset": {
+    "ptr_offset": -11,
+    "ptr_deref": 4,
+    "gameplay_ptr": 104,
+    "gameplay_base": 56,
+    "gameplay_score": 252,
+    "mode": 100,
+    "mods_ptr": 28,
+    "mods_xor1": 12,
+    "mods_xor2": 8
+  }
+}
