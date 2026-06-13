@@ -1034,7 +1034,7 @@ impl TourneyReader {
     ) {
         use std::sync::atomic::{AtomicU32, Ordering};
         static TICK: AtomicU32 = AtomicU32::new(0);
-        if TICK.fetch_add(1, Ordering::Relaxed) % 64 != 0 {
+        if !TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(64) {
             return;
         }
         let scan = |addr: usize, len: usize| {
@@ -1066,7 +1066,7 @@ impl TourneyReader {
     fn warn_outdated_offsets(slot: i32, gameplay_base: usize, score_base: usize) {
         use std::sync::atomic::{AtomicU32, Ordering};
         static THROTTLE: AtomicU32 = AtomicU32::new(0);
-        if THROTTLE.fetch_add(1, Ordering::Relaxed) % 300 == 0 {
+        if THROTTLE.fetch_add(1, Ordering::Relaxed).is_multiple_of(300) {
             log_error!(
                 "slot {}: score base resolved to implausible pointer 0x{:X} (via gameplay base 0x{:X})",
                 slot,

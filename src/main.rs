@@ -1,13 +1,17 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use env_logger::Builder;
 use std::io::Write;
 
+mod finder;
 mod memory;
 mod server;
 
 #[derive(Parser, Debug)]
 #[command(name = "osu-tourney-data-reader")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// port for the server
     #[arg(short, long, default_value = "25050")]
     port: u16,
@@ -19,6 +23,11 @@ struct Args {
     /// attach to a single standard osu! client as slot 0 for debugging
     #[arg(long)]
     debug_standalone: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    FindOffset,
 }
 
 fn init_logger(verbose: bool) {
@@ -52,5 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     init_logger(args.verbose);
 
-    server::run(args.port, args.debug_standalone).await
+    match args.command {
+        Some(Command::FindOffset) => finder::run_finder(),
+        None => server::run(args.port, args.debug_standalone).await,
+    }
 }
