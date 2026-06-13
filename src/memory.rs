@@ -61,7 +61,7 @@ mod windows_memory {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_EXECUTE_READ,
+        VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_EXECUTE_READ,
         PAGE_EXECUTE_READWRITE, PAGE_READONLY, PAGE_READWRITE,
     };
     use windows::Win32::System::Threading::{
@@ -185,6 +185,122 @@ mod windows_memory {
             );
             Err(MemoryError::ReadFailed("Pattern not found".into()))
         }
+
+        pub fn scan_range(&self, min: i32, max: i32) -> Vec<(usize, i32)> {
+            let mut hits = Vec::new();
+            let mut addr: usize = 0;
+            let mut mbi = MEMORY_BASIC_INFORMATION::default();
+
+            while unsafe {
+                VirtualQueryEx(
+                    self.handle,
+                    Some(addr as *const _),
+                    &mut mbi,
+                    std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                )
+            } != 0
+            {
+                let protect = mbi.Protect;
+                let is_readable = protect == PAGE_READONLY
+                    || protect == PAGE_READWRITE
+                    || protect == PAGE_EXECUTE_READ
+                    || protect == PAGE_EXECUTE_READWRITE;
+
+                if mbi.State == MEM_COMMIT
+                    && mbi.Type == MEM_PRIVATE
+                    && is_readable
+                    && mbi.RegionSize > 0
+                {
+                    if let Ok(region) = self.read_bytes(mbi.BaseAddress as usize, mbi.RegionSize) {
+                        let mut off = 0;
+                        while off + 4 <= region.len() {
+                            let v = i32::from_le_bytes([
+                                region[off],
+                                region[off + 1],
+                                region[off + 2],
+                                region[off + 3],
+                            ]);
+                            if v >= min && v <= max {
+                                hits.push((mbi.BaseAddress as usize + off, v));
+                            }
+                            off += 4;
+                        }
+                    }
+                }
+
+                addr = mbi.BaseAddress as usize + mbi.RegionSize;
+                if addr == 0 {
+                    break;
+                }
+            }
+            hits
+        }
+
+        fn private_regions(&self) -> Vec<(usize, usize)> {
+            let mut regions = Vec::new();
+            let mut addr: usize = 0;
+            let mut mbi = MEMORY_BASIC_INFORMATION::default();
+
+            while unsafe {
+                VirtualQueryEx(
+                    self.handle,
+                    Some(addr as *const _),
+                    &mut mbi,
+                    std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                )
+            } != 0
+            {
+                let protect = mbi.Protect;
+                let is_readable = protect == PAGE_READONLY
+                    || protect == PAGE_READWRITE
+                    || protect == PAGE_EXECUTE_READ
+                    || protect == PAGE_EXECUTE_READWRITE;
+                let base = mbi.BaseAddress as usize;
+
+                if mbi.State == MEM_COMMIT
+                    && mbi.Type == MEM_PRIVATE
+                    && is_readable
+                    && mbi.RegionSize > 0
+                {
+                    regions.push((base, base + mbi.RegionSize));
+                }
+
+                addr = base + mbi.RegionSize;
+                if addr == 0 {
+                    break;
+                }
+            }
+            regions
+        }
+
+        pub fn scan_pointers(&self) -> Vec<(usize, usize)> {
+            let regions = self.private_regions();
+            let in_region = |v: usize| {
+                let i = regions.partition_point(|&(start, _)| start <= v);
+                i > 0 && v < regions[i - 1].1
+            };
+
+            let mut out = Vec::new();
+            for &(base, end) in &regions {
+                if let Ok(region) = self.read_bytes(base, end - base) {
+                    let mut off = 0;
+                    while off + 4 <= region.len() {
+                        let v = u32::from_le_bytes([
+                            region[off],
+                            region[off + 1],
+                            region[off + 2],
+                            region[off + 3],
+                        ]) as usize;
+                        // real pointers are 4-aligned
+                        if v & 3 == 0 && in_region(v) {
+                            out.push((v, base + off));
+                        }
+                        off += 4;
+                    }
+                }
+            }
+            out
+        }
     }
 
     impl Drop for ProcessMemory {
@@ -246,6 +362,12 @@ impl ProcessMemory {
         unimplemented!()
     }
     pub fn pattern_scan(&self, _: &[u8], _: &[bool]) -> Result<usize, MemoryError> {
+        unimplemented!()
+    }
+    pub fn scan_range(&self, _: i32, _: i32) -> Vec<(usize, i32)> {
+        unimplemented!()
+    }
+    pub fn scan_pointers(&self) -> Vec<(usize, usize)> {
         unimplemented!()
     }
 }
@@ -318,11 +440,11 @@ pub struct TourneyClient {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct Offsets {
+pub(crate) struct Offsets {
     patterns: PatternOffsets,
     base: BaseOffsets,
     beatmap: BeatmapOffsets,
-    ruleset: RulesetOffsets,
+    pub(crate) ruleset: RulesetOffsets,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -342,30 +464,32 @@ struct BeatmapOffsets {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct RulesetOffsets {
+pub(crate) struct RulesetOffsets {
     ptr_offset: isize,
     ptr_deref: usize,
-    gameplay_ptr: usize,
-    gameplay_base: usize,
+    pub(crate) gameplay_ptr: usize,
+    pub(crate) gameplay_base: usize,
     gameplay_score: usize,
+    #[serde(default)]
+    gameplay_score_spectator: usize,
     mode: usize,
     mods_ptr: usize,
     mods_xor1: usize,
     mods_xor2: usize,
 }
 
-fn load_offsets() -> Result<Offsets, String> {
+pub(crate) fn load_offsets() -> Result<Offsets, String> {
     let json = include_str!("../assets/offsets.json");
     serde_json::from_str(json).map_err(|e| format!("Failed to parse offsets.json: {}", e))
 }
 
 #[derive(Clone)]
-struct TourneyClientProcess {
+pub(crate) struct TourneyClientProcess {
     slot: i32,
     pid: u32,
-    process: ProcessMemory,
-    rulesets_addr: usize,
-    base_addr: usize,
+    pub(crate) process: ProcessMemory,
+    pub(crate) rulesets_addr: usize,
+    pub(crate) base_addr: usize,
 }
 
 pub struct TourneyReader {
@@ -529,7 +653,7 @@ impl TourneyReader {
     }
 
     #[cfg(target_os = "windows")]
-    fn find_osu_processes() -> Result<Vec<u32>, MemoryError> {
+    pub(crate) fn find_osu_processes() -> Result<Vec<u32>, MemoryError> {
         use windows::Win32::System::ProcessStatus::{EnumProcesses, GetModuleBaseNameW};
         use windows::Win32::System::Threading::{
             OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
@@ -585,12 +709,12 @@ impl TourneyReader {
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn find_osu_processes() -> Result<Vec<u32>, MemoryError> {
+    pub(crate) fn find_osu_processes() -> Result<Vec<u32>, MemoryError> {
         Err(MemoryError::ReadFailed("Windows only".into()))
     }
 
     #[cfg(target_os = "windows")]
-    fn enumerate_osu_windows() -> HashMap<u32, String> {
+    pub(crate) fn enumerate_osu_windows() -> HashMap<u32, String> {
         use std::sync::Mutex;
         use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -635,12 +759,14 @@ impl TourneyReader {
     }
 
     #[cfg(target_os = "windows")]
-    fn is_lazer_title(title: &str) -> bool {
+    pub(crate) fn is_lazer_title(title: &str) -> bool {
         title.to_lowercase().contains("[tournament client]")
     }
 
     #[cfg(target_os = "windows")]
-    fn identify_tourney_processes(pids: &[u32]) -> Result<(u32, Vec<(i32, u32)>), MemoryError> {
+    pub(crate) fn identify_tourney_processes(
+        pids: &[u32],
+    ) -> Result<(u32, Vec<(i32, u32)>), MemoryError> {
         let window_map = Self::enumerate_osu_windows();
         log_debug!("Window titles: {:?}", window_map);
 
@@ -679,11 +805,13 @@ impl TourneyReader {
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn identify_tourney_processes(_: &[u32]) -> Result<(u32, Vec<(i32, u32)>), MemoryError> {
+    pub(crate) fn identify_tourney_processes(
+        _: &[u32],
+    ) -> Result<(u32, Vec<(i32, u32)>), MemoryError> {
         Err(MemoryError::ReadFailed("Windows only".into()))
     }
 
-    fn resolve_ruleset(
+    pub(crate) fn resolve_ruleset(
         process: &ProcessMemory,
         rulesets_addr: usize,
         offsets: &RulesetOffsets,
@@ -703,7 +831,7 @@ impl TourneyReader {
         Ok(ruleset)
     }
 
-    fn init_client_process(
+    pub(crate) fn init_client_process(
         pid: u32,
         slot: i32,
         offsets: &Offsets,
@@ -713,6 +841,8 @@ impl TourneyReader {
         let process = ProcessMemory::new(pid).map_err(|e| {
             MemoryError::ReadFailed(format!("Failed to open client {}: {}", slot, e))
         })?;
+
+        log_info!("Scanning slot {} memory...", slot);
 
         log_debug!("Scanning memory for rulesets pattern in client {}", slot);
         let (rulesets_pattern, rulesets_mask) = parse_pattern(&offsets.patterns.rulesets);
@@ -741,6 +871,8 @@ impl TourneyReader {
             })?;
 
         log_debug!("Client {} base pattern found at 0x{:X}", slot, base_addr);
+
+        log_info!("Slot {} memory patterns resolved", slot);
 
         log_debug!("Client {} initialized successfully", slot);
         Ok(TourneyClientProcess {
@@ -783,7 +915,7 @@ impl TourneyReader {
 
         let mut had_failure = false;
         for (i, client) in clients.iter().enumerate() {
-            if !Self::read_client_data(client, &mut data.clients[i], offsets) {
+            if !Self::read_client_data(client, &mut data.clients[i], offsets, self.standalone) {
                 had_failure = true;
             }
             let slot = data.clients[i].slot;
@@ -817,6 +949,7 @@ impl TourneyReader {
         client: &TourneyClientProcess,
         out: &mut TourneyClient,
         offsets: &Offsets,
+        standalone: bool,
     ) -> bool {
         let p = &client.process;
         out.slot = client.slot;
@@ -856,9 +989,15 @@ impl TourneyReader {
             return true;
         }
 
-        let raw_score = p
-            .read_i32(base + offsets.ruleset.gameplay_score)
-            .unwrap_or(0);
+        Self::log_gameplay_chain(p, client.slot, ruleset_addr, ptr1, base);
+
+        let spectator_off = offsets.ruleset.gameplay_score_spectator;
+        let raw_score = if !standalone && spectator_off != 0 {
+            p.read_i32(ruleset_addr + spectator_off).unwrap_or(0)
+        } else {
+            p.read_i32(base + offsets.ruleset.gameplay_score)
+                .unwrap_or(0)
+        };
         if (0..2_000_000_000).contains(&raw_score) {
             out.score = raw_score;
         }
@@ -885,11 +1024,49 @@ impl TourneyReader {
         (0..=3).contains(&mode)
     }
 
-    // log values that are likely garbage
+    // dumps a throttled resolved gameplay chain under --verbose
+    fn log_gameplay_chain(
+        p: &ProcessMemory,
+        slot: i32,
+        ruleset_addr: usize,
+        ptr1: usize,
+        base: usize,
+    ) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static TICK: AtomicU32 = AtomicU32::new(0);
+        if !TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(64) {
+            return;
+        }
+        let scan = |addr: usize, len: usize| {
+            let mut out = String::new();
+            for off in (0..len).step_by(4) {
+                if let Ok(v) = p.read_i32(addr + off) {
+                    if v != 0 {
+                        out.push_str(&format!(" +0x{:X}={}", off, v));
+                    }
+                }
+            }
+            out
+        };
+        log_debug!(
+            "slot {} ruleset 0x{:X}:{}",
+            slot,
+            ruleset_addr,
+            scan(ruleset_addr, 0x110)
+        );
+        log_debug!(
+            "slot {} gameplayBase 0x{:X}:{}",
+            slot,
+            ptr1,
+            scan(ptr1, 0x60)
+        );
+        log_debug!("slot {} scoreBase 0x{:X}:{}", slot, base, scan(base, 0xD0));
+    }
+
     fn warn_outdated_offsets(slot: i32, gameplay_base: usize, score_base: usize) {
         use std::sync::atomic::{AtomicU32, Ordering};
         static THROTTLE: AtomicU32 = AtomicU32::new(0);
-        if THROTTLE.fetch_add(1, Ordering::Relaxed) % 300 == 0 {
+        if THROTTLE.fetch_add(1, Ordering::Relaxed).is_multiple_of(300) {
             log_error!(
                 "slot {}: score base resolved to implausible pointer 0x{:X} (via gameplay base 0x{:X})",
                 slot,
@@ -900,7 +1077,7 @@ impl TourneyReader {
     }
 }
 
-fn is_plausible_ptr(addr: usize) -> bool {
+pub(crate) fn is_plausible_ptr(addr: usize) -> bool {
     (0x1_0000..=0xFFFF_FFFF).contains(&addr)
 }
 
