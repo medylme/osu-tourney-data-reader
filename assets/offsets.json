@@ -12,9 +12,9 @@
   "ruleset": {
     "ptr_offset": -11,
     "ptr_deref": 4,
-    "gameplay_ptr": 104,
+    "gameplay_ptr": 100,
     "gameplay_base": 56,
-    "gameplay_score": 252,
+    "gameplay_score": 120,
     "mode": 100,
     "mods_ptr": 28,
     "mods_xor1": 12,

@@ -847,12 +847,17 @@ impl TourneyReader {
             return true;
         }
 
+        if !is_plausible_ptr(base) {
+            Self::warn_outdated_offsets(client.slot, ptr1, base);
+            return true;
+        }
+
         if !Self::is_gameplay_active(p, base, offsets) {
             return true;
         }
 
         let raw_score = p
-            .read_i32(ruleset_addr + offsets.ruleset.gameplay_score)
+            .read_i32(base + offsets.ruleset.gameplay_score)
             .unwrap_or(0);
         if (0..2_000_000_000).contains(&raw_score) {
             out.score = raw_score;
@@ -879,6 +884,24 @@ impl TourneyReader {
         let mode = p.read_i32(base + offsets.ruleset.mode).unwrap_or(-1);
         (0..=3).contains(&mode)
     }
+
+    // log values that are likely garbage
+    fn warn_outdated_offsets(slot: i32, gameplay_base: usize, score_base: usize) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static THROTTLE: AtomicU32 = AtomicU32::new(0);
+        if THROTTLE.fetch_add(1, Ordering::Relaxed) % 300 == 0 {
+            log_error!(
+                "slot {}: score base resolved to implausible pointer 0x{:X} (via gameplay base 0x{:X})",
+                slot,
+                score_base,
+                gameplay_base
+            );
+        }
+    }
+}
+
+fn is_plausible_ptr(addr: usize) -> bool {
+    (0x1_0000..=0xFFFF_FFFF).contains(&addr)
 }
 
 fn parse_mods_bitfield(mods: u32) -> GameplayMods {
