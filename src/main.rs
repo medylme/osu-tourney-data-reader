@@ -15,6 +15,10 @@ struct Args {
     /// debug logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// attach to a single standard osu! client as slot 0 for debugging
+    #[arg(long)]
+    debug_standalone: bool,
 }
 
 fn init_logger(verbose: bool) {
@@ -48,5 +52,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     init_logger(args.verbose);
 
-    server::run(args.port).await
+    server::run(args.port, args.debug_standalone).await
 }

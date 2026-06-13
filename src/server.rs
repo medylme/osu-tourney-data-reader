@@ -27,9 +27,15 @@ macro_rules! log_warn {
     ($($arg:tt)*) => { log::warn!("[server] {}", format!($($arg)*)) };
 }
 
-pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn run(
+    port: u16,
+    standalone: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     log_debug!("Initializing memory reader");
-    let reader = Arc::new(TourneyReader::new());
+    if standalone {
+        log_info!("Standalone debugging enabled (fallback to a single osu! client)");
+    }
+    let reader = Arc::new(TourneyReader::new(standalone));
 
     let reader_loop = reader.clone();
     tokio::spawn(async move {

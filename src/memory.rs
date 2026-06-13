@@ -370,12 +370,13 @@ struct TourneyClientProcess {
 
 pub struct TourneyReader {
     offsets: Option<Offsets>,
+    standalone: bool,
     clients: RwLock<Vec<TourneyClientProcess>>,
     data: RwLock<TourneyData>,
 }
 
 impl TourneyReader {
-    pub fn new() -> Self {
+    pub fn new(standalone: bool) -> Self {
         let offsets = match load_offsets() {
             Ok(o) => {
                 log_debug!("Successfully loaded offsets");
@@ -389,8 +390,24 @@ impl TourneyReader {
 
         Self {
             offsets,
+            standalone,
             clients: RwLock::new(Vec::new()),
             data: RwLock::new(TourneyData::default()),
+        }
+    }
+
+    fn resolve_client_pids(&self, pids: &[u32]) -> Result<(Vec<(i32, u32)>, bool), MemoryError> {
+        let tourney_err = match Self::identify_tourney_processes(pids) {
+            Ok((_, clients)) if !clients.is_empty() => return Ok((clients, false)),
+            Ok(_) => MemoryError::ProcessNotFound,
+            Err(e) => e,
+        };
+
+        if self.standalone {
+            let pid = *pids.first().ok_or(MemoryError::ProcessNotFound)?;
+            Ok((vec![(0, pid)], true))
+        } else {
+            Err(tourney_err)
         }
     }
 
@@ -418,7 +435,7 @@ impl TourneyReader {
 
         log_debug!("Found {} osu! process(es): {:?}", pids.len(), pids);
 
-        let (manager_pid, clients) = match Self::identify_tourney_processes(&pids) {
+        let (clients, standalone_fallback) = match self.resolve_client_pids(&pids) {
             Ok(r) => r,
             Err(e) => {
                 log_debug!("Tournament not detected: {}", e);
@@ -426,11 +443,14 @@ impl TourneyReader {
             }
         };
 
-        log_debug!(
-            "Tournament manager PID: {}, clients: {:?}",
-            manager_pid,
-            clients
-        );
+        if standalone_fallback {
+            log_warn!(
+                "No tournament detected - attaching to osu! PID {} as slot 0 (standalone debug mode)",
+                clients[0].1
+            );
+        } else {
+            log_debug!("Tournament clients: {:?}", clients);
+        }
 
         let mut new_clients = Vec::new();
         for (slot, pid) in clients {
@@ -478,7 +498,7 @@ impl TourneyReader {
             Err(_) => return false,
         };
 
-        let (_, current_clients) = match Self::identify_tourney_processes(&pids) {
+        let (current_clients, _) = match self.resolve_client_pids(&pids) {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -549,6 +569,18 @@ impl TourneyReader {
                 }
             }
         }
+
+        // drop lazer instances
+        let titles = Self::enumerate_osu_windows();
+        osu_pids.retain(|pid| {
+            if titles.get(pid).is_some_and(|t| Self::is_lazer_title(t)) {
+                log_debug!("Ignoring lazer instance (PID {})", pid);
+                false
+            } else {
+                true
+            }
+        });
+
         Ok(osu_pids)
     }
 
@@ -558,7 +590,7 @@ impl TourneyReader {
     }
 
     #[cfg(target_os = "windows")]
-    fn identify_tourney_processes(pids: &[u32]) -> Result<(u32, Vec<(i32, u32)>), MemoryError> {
+    fn enumerate_osu_windows() -> HashMap<u32, String> {
         use std::sync::Mutex;
         use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -598,8 +630,19 @@ impl TourneyReader {
             );
         }
 
-        let window_map = results.lock().unwrap();
-        log_debug!("Window titles: {:?}", *window_map);
+        let window_map = results.lock().unwrap().clone();
+        window_map
+    }
+
+    #[cfg(target_os = "windows")]
+    fn is_lazer_title(title: &str) -> bool {
+        title.to_lowercase().contains("[tournament client]")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn identify_tourney_processes(pids: &[u32]) -> Result<(u32, Vec<(i32, u32)>), MemoryError> {
+        let window_map = Self::enumerate_osu_windows();
+        log_debug!("Window titles: {:?}", window_map);
 
         let mut manager_pid = None;
         let mut client_map: HashMap<i32, u32> = HashMap::new();
