@@ -15,6 +15,7 @@ use tokio::time::{self, Duration};
 const POLLING_INTERVAL_MS: u64 = 16;
 const SCAN_INTERVAL_MS: u64 = 1000;
 const VALIDATE_INTERVAL: u32 = 62;
+const MAX_PORT_ATTEMPTS: u16 = 10;
 
 macro_rules! log_info {
     ($($arg:tt)*) => { log::info!("[server] {}", format!($($arg)*)) };
@@ -40,13 +41,52 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Syn
         .route("/json", get(json_handler))
         .with_state(reader);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = bind_with_fallback(port).await?;
+    let addr = listener.local_addr()?;
+
+    print_banner(addr.port());
     log_info!("Listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+async fn bind_with_fallback(port: u16) -> std::io::Result<tokio::net::TcpListener> {
+    let mut last_err = None;
+
+    for offset in 0..=MAX_PORT_ATTEMPTS {
+        let Some(candidate) = port.checked_add(offset) else {
+            break;
+        };
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], candidate));
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                if candidate != port {
+                    log_warn!("Port {} in use, bound to {} instead", port, candidate);
+                }
+                return Ok(listener);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                log_warn!("Port {} in use, trying {}", candidate, candidate + 1);
+                last_err = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(last_err
+        .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrInUse, "no available port")))
+}
+
+fn print_banner(port: u16) {
+    println!();
+    println!("  osu! Tourney Data Reader");
+    println!("  ----------------------");
+    println!("  WebSocket: ws://127.0.0.1:{}", port);
+    println!("  JSON:      http://127.0.0.1:{}/json", port);
+    println!();
 }
 
 async fn run_state_machine(reader: Arc<TourneyReader>) {

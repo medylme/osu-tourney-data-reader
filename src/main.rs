@@ -48,12 +48,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     init_logger(args.verbose);
 
-    println!();
-    println!("  osu! Tourney Data Reader");
-    println!("  ----------------------");
-    println!("  WebSocket: ws://127.0.0.1:{}", args.port);
-    println!("  JSON:      http://127.0.0.1:{}/json", args.port);
-    println!();
-
     server::run(args.port).await
 }
